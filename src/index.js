@@ -101,7 +101,7 @@ app.use((err, req, res, next) => {
         .json({ success: false, error: err.message || "Internal server error" });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 yt-2-mp4 API running on port ${PORT}`);
     console.log(`📡 Health check: http://localhost:${PORT}/health`);
     console.log(`📚 Swagger UI:   http://localhost:${PORT}/docs`);
