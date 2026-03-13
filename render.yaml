@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: yt-2-mp4
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DOWNLOADS_DIR
+        value: /tmp/downloads
+    healthCheckPath: /health
