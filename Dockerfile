@@ -9,20 +9,32 @@ RUN npm install --omit=dev
 # ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM node:20-slim
 
-# Install ffmpeg, python3, curl, ca-certificates
-RUN apt-get update --allow-releaseinfo-change -o Acquire::Check-Valid-Until=false -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true && \
-    apt-get install -y --no-install-recommends --allow-unauthenticated \
+# Install system dependencies: ffmpeg, python3, pip, curl, git, ca-certificates
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     ffmpeg \
     python3 \
+    python3-pip \
+    python3-venv \
     curl \
+    git \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install latest yt-dlp binary and verify
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp \
-    && yt-dlp --version
+# Install latest yt-dlp via pip into a venv (avoids externally-managed-environment error)
+RUN python3 -m venv /opt/yt-dlp-env && \
+    /opt/yt-dlp-env/bin/pip install --no-cache-dir -U yt-dlp && \
+    ln -s /opt/yt-dlp-env/bin/yt-dlp /usr/local/bin/yt-dlp && \
+    yt-dlp --version
+
+# Install bgutil-ytdlp-pot-provider plugin (PO Token provider - fixes bot detection)
+RUN /opt/yt-dlp-env/bin/pip install --no-cache-dir bgutil-ytdlp-pot-provider
+
+# Clone and build the bgutil POT HTTP server
+RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-pot && \
+    cd /opt/bgutil-pot/server && \
+    npm ci --omit=dev && \
+    npx tsc
 
 WORKDIR /app
 
@@ -42,7 +54,8 @@ ENV NODE_ENV=production \
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:${PORT:-3000}/health || exit 1
 
-CMD ["node", "src/index.js"]
+# Start both the POT server (background) and the main API
+CMD ["sh", "-c", "node /opt/bgutil-pot/server/build/main.js &  node src/index.js"]

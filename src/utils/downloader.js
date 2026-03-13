@@ -10,6 +10,30 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
 }
 
 /**
+ * Resolve the path to a YouTube cookies file.
+ *
+ * Priority:
+ *   1. YOUTUBE_COOKIES_FILE  – path to an existing Netscape-format cookies file
+ *   2. YOUTUBE_COOKIES       – raw cookie file content; written to /tmp/yt_cookies.txt at startup
+ *
+ * Export cookies from Chrome with:
+ *   yt-dlp --cookies-from-browser chrome --cookies cookies.txt
+ * or use the "Get cookies.txt LOCALLY" browser extension.
+ */
+let COOKIES_FILE = null;
+
+if (process.env.YOUTUBE_COOKIES_FILE && fs.existsSync(process.env.YOUTUBE_COOKIES_FILE)) {
+    COOKIES_FILE = process.env.YOUTUBE_COOKIES_FILE;
+    console.log(`[COOKIES] Using cookie file from YOUTUBE_COOKIES_FILE: ${COOKIES_FILE}`);
+} else if (process.env.YOUTUBE_COOKIES) {
+    COOKIES_FILE = "/tmp/yt_cookies.txt";
+    fs.writeFileSync(COOKIES_FILE, process.env.YOUTUBE_COOKIES, "utf8");
+    console.log(`[COOKIES] Wrote YOUTUBE_COOKIES env var to ${COOKIES_FILE}`);
+} else {
+    console.log("[COOKIES] No cookies configured — relying on bgutil PO Token provider");
+}
+
+/**
  * Validate YouTube URL
  */
 function isValidYouTubeUrl(url) {
@@ -30,10 +54,7 @@ function getVideoInfo(url) {
             "--dump-json",
             "--no-playlist",
             "--no-warnings",
-            // Bypass YouTube bot detection by using Android/TV player clients
-            "--extractor-args", "youtube:player_client=android,web;player_skip=webpage",
-            "--user-agent", "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-            "--add-header", "Accept-Language:en-US,en;q=0.9",
+            ...(COOKIES_FILE ? ["--cookies", COOKIES_FILE] : []),
             url,
         ];
 
@@ -109,14 +130,9 @@ function downloadVideo(url, quality = "best", outputId, onProgress) {
             "--no-playlist",
             "--no-warnings",
             "--newline",
-            // Bypass YouTube bot detection by using Android/TV player clients
-            "--extractor-args", "youtube:player_client=android,web;player_skip=webpage",
-            "--user-agent", "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-            "--add-header", "Accept-Language:en-US,en;q=0.9",
             "--retries", "5",
             "--fragment-retries", "5",
-            "--sleep-interval", "1",
-            "--max-sleep-interval", "5",
+            ...(COOKIES_FILE ? ["--cookies", COOKIES_FILE] : []),
             url,
         ];
 

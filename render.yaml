@@ -9,4 +9,10 @@ services:
         value: production
       - key: DOWNLOADS_DIR
         value: /tmp/downloads
+      # Optional: paste Netscape-format YouTube cookies here as a secret env var.
+      # Export with: yt-dlp --cookies-from-browser chrome --cookies cookies.txt
+      # Or use the "Get cookies.txt LOCALLY" Chrome/Firefox extension.
+      # If not set, the bgutil PO Token provider will handle authentication.
+      - key: YOUTUBE_COOKIES
+        sync: false
     healthCheckPath: /health
