@@ -1,182 +1,203 @@
+const { Innertube } = require("youtubei.js");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || "/tmp/downloads";
 
-// Ensure download directory exists
 if (!fs.existsSync(DOWNLOADS_DIR)) {
     fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 }
 
-/**
- * Resolve the path to a YouTube cookies file.
- *
- * Priority:
- *   1. YOUTUBE_COOKIES_FILE  – path to an existing Netscape-format cookies file
- *   2. YOUTUBE_COOKIES       – raw cookie file content; written to /tmp/yt_cookies.txt at startup
- *
- * Export cookies from Chrome with:
- *   yt-dlp --cookies-from-browser chrome --cookies cookies.txt
- * or use the "Get cookies.txt LOCALLY" browser extension.
- */
-let COOKIES_FILE = null;
+// Singleton Innertube instance
+let _yt = null;
 
-if (process.env.YOUTUBE_COOKIES_FILE && fs.existsSync(process.env.YOUTUBE_COOKIES_FILE)) {
-    COOKIES_FILE = process.env.YOUTUBE_COOKIES_FILE;
-    console.log(`[COOKIES] Using cookie file from YOUTUBE_COOKIES_FILE: ${COOKIES_FILE}`);
-} else if (process.env.YOUTUBE_COOKIES) {
-    COOKIES_FILE = "/tmp/yt_cookies.txt";
-    fs.writeFileSync(COOKIES_FILE, process.env.YOUTUBE_COOKIES, "utf8");
-    console.log(`[COOKIES] Wrote YOUTUBE_COOKIES env var to ${COOKIES_FILE}`);
-} else {
-    console.log("[COOKIES] No cookies configured — relying on bgutil PO Token provider");
+async function getInnertube() {
+    if (!_yt) {
+        _yt = await Innertube.create();
+        console.log("[INNERTUBE] Session created");
+    }
+    return _yt;
+}
+
+/**
+ * Extract YouTube video ID from URL
+ */
+function extractVideoId(url) {
+    const m = url.match(/(?:[?&]v=|youtu\.be\/|\/shorts\/)([a-zA-Z0-9_-]{11})/);
+    return m ? m[1] : null;
 }
 
 /**
  * Validate YouTube URL
  */
 function isValidYouTubeUrl(url) {
-    const patterns = [
-        /^https?:\/\/(www\.)?youtube\.com\/watch\?v=[\w-]{11}/,
-        /^https?:\/\/youtu\.be\/[\w-]{11}/,
-        /^https?:\/\/(www\.)?youtube\.com\/shorts\/[\w-]{11}/,
-    ];
-    return patterns.some((p) => p.test(url));
+    return !!extractVideoId(url);
+}
+
+/**
+ * Get a format's streaming URL (handles ciphered and plain)
+ */
+function getFormatUrl(format, player) {
+    if (format.url) return format.url;
+    return format.decipher(player);
+}
+
+/**
+ * Format seconds → MM:SS or HH:MM:SS
+ */
+function formatDuration(seconds) {
+    if (!seconds) return "0:00";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return h > 0
+        ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+        : `${m}:${String(s).padStart(2, "0")}`;
 }
 
 /**
  * Get video info from YouTube URL
  */
-function getVideoInfo(url) {
-    return new Promise((resolve, reject) => {
-        const args = [
-            "--dump-json",
-            "--no-playlist",
-            "--no-warnings",
-            ...(COOKIES_FILE ? ["--cookies", COOKIES_FILE] : []),
-            url,
-        ];
+async function getVideoInfo(url) {
+    const id = extractVideoId(url);
+    if (!id) throw new Error("Invalid YouTube URL");
 
-        const proc = spawn("yt-dlp", args);
-        let stdout = "";
-        let stderr = "";
+    try {
+        const yt = await getInnertube();
+        const info = await yt.getInfo(id);
+        const bi = info.basic_info;
 
-        proc.stdout.on("data", (d) => (stdout += d.toString()));
-        proc.stderr.on("data", (d) => (stderr += d.toString()));
+        const videoFormats = (info.streaming_data?.adaptive_formats ?? [])
+            .filter((f) => f.has_video && !f.has_audio && f.mime_type?.startsWith("video/mp4"))
+            .map((f) => ({
+                formatId: String(f.itag),
+                quality: `${f.height}p`,
+                height: f.height,
+                fps: f.fps,
+                filesize: f.content_length ? parseInt(f.content_length) : null,
+            }))
+            .sort((a, b) => b.height - a.height);
 
-        proc.on("close", (code) => {
-            if (code !== 0) {
-                return reject(new Error(`yt-dlp failed: ${stderr.trim()}`));
-            }
-            try {
-                const info = JSON.parse(stdout);
-                resolve({
-                    id: info.id,
-                    title: info.title,
-                    duration: info.duration,
-                    durationString: info.duration_string,
-                    thumbnail: info.thumbnail,
-                    uploader: info.uploader,
-                    viewCount: info.view_count,
-                    uploadDate: info.upload_date,
-                    description: info.description?.slice(0, 300),
-                    formats: info.formats
-                        ?.filter((f) => f.ext === "mp4" && f.height)
-                        .map((f) => ({
-                            formatId: f.format_id,
-                            quality: `${f.height}p`,
-                            height: f.height,
-                            fps: f.fps,
-                            filesize: f.filesize,
-                        }))
-                        .sort((a, b) => b.height - a.height),
-                });
-            } catch (e) {
-                reject(new Error("Failed to parse video info"));
-            }
-        });
-
-        proc.on("error", (err) => {
-            reject(new Error(`Failed to run yt-dlp: ${err.message}`));
-        });
-    });
+        return {
+            id: bi.id,
+            title: bi.title,
+            duration: bi.duration,
+            durationString: formatDuration(bi.duration),
+            thumbnail: bi.thumbnail?.[0]?.url,
+            uploader: bi.channel?.name,
+            viewCount: bi.view_count,
+            description: bi.short_description?.slice(0, 300),
+            formats: videoFormats,
+        };
+    } catch (err) {
+        _yt = null; // reset on error so next call retries
+        throw err;
+    }
 }
 
 /**
  * Download YouTube video as MP4
- * @param {string} url - YouTube URL
- * @param {string} quality - "best", "1080", "720", "480", "360"
- * @param {string} outputId - Unique ID for output file
- * @param {function} onProgress - Progress callback
+ * Uses youtubei.js to get stream URLs, then ffmpeg to merge video + audio.
  */
-function downloadVideo(url, quality = "best", outputId, onProgress) {
+async function downloadVideo(url, quality = "best", outputId, onProgress) {
+    const id = extractVideoId(url);
+    if (!id) throw new Error("Invalid YouTube URL");
+
+    let info, player;
+    try {
+        const yt = await getInnertube();
+        info = await yt.getInfo(id);
+        player = yt.session.player;
+    } catch (err) {
+        _yt = null;
+        throw err;
+    }
+
+    const outputPath = path.join(DOWNLOADS_DIR, `${outputId}.mp4`);
+    const adaptive = info.streaming_data?.adaptive_formats ?? [];
+
+    // Video-only MP4 formats
+    const videoFormats = adaptive
+        .filter((f) => f.has_video && !f.has_audio && f.mime_type?.startsWith("video/mp4"))
+        .sort((a, b) => b.height - a.height);
+
+    // Audio-only formats
+    const audioFormats = adaptive
+        .filter((f) => f.has_audio && !f.has_video)
+        .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+
+    if (!videoFormats.length) throw new Error("No video formats available");
+    if (!audioFormats.length) throw new Error("No audio formats available");
+
+    // Pick video format by quality
+    let videoFormat;
+    if (quality === "best") {
+        videoFormat = videoFormats[0];
+    } else {
+        const targetH = parseInt(quality);
+        videoFormat =
+            videoFormats.find((f) => f.height <= targetH) ??
+            videoFormats[videoFormats.length - 1];
+    }
+    const audioFormat = audioFormats[0];
+
+    const videoUrl = getFormatUrl(videoFormat, player);
+    const audioUrl = getFormatUrl(audioFormat, player);
+
+    console.log(`[DOWNLOAD] Video: ${videoFormat.height}p | Audio: ${audioFormat.bitrate}bps`);
+
     return new Promise((resolve, reject) => {
-        const outputPath = path.join(DOWNLOADS_DIR, `${outputId}.mp4`);
-
-        // Build format selector
-        let formatSelector;
-        if (quality === "best") {
-            formatSelector = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
-        } else {
-            const h = parseInt(quality);
-            formatSelector = `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${h}][ext=mp4]/best[height<=${h}]`;
-        }
-
+        // ffmpeg -i <videoUrl> -i <audioUrl> -c:v copy -c:a aac <output>
         const args = [
-            "--format", formatSelector,
-            "--merge-output-format", "mp4",
-            "--output", outputPath,
-            "--no-playlist",
-            "--no-warnings",
-            "--newline",
-            "--retries", "5",
-            "--fragment-retries", "5",
-            ...(COOKIES_FILE ? ["--cookies", COOKIES_FILE] : []),
-            url,
+            "-y",
+            "-i", videoUrl,
+            "-i", audioUrl,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            outputPath,
         ];
 
-        const proc = spawn("yt-dlp", args);
+        const proc = spawn("ffmpeg", args);
         let stderr = "";
 
-        proc.stdout.on("data", (data) => {
-            const line = data.toString().trim();
-            // Parse progress lines like: [download]  45.2% of 123.45MiB
-            const match = line.match(/\[download\]\s+([\d.]+)%/);
-            if (match && onProgress) {
-                onProgress(parseFloat(match[1]));
+        proc.stderr.on("data", (d) => {
+            const chunk = d.toString();
+            stderr += chunk;
+            // Parse ffmpeg progress: "time=00:01:23.45"
+            const m = chunk.match(/time=(\d+):(\d+):([\d.]+)/);
+            if (m && onProgress && info.basic_info.duration) {
+                const elapsed = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+                onProgress(Math.min(100, (elapsed / info.basic_info.duration) * 100));
             }
         });
 
-        proc.stderr.on("data", (d) => (stderr += d.toString()));
-
         proc.on("close", (code) => {
             if (code !== 0) {
-                return reject(new Error(`Download failed: ${stderr.trim()}`));
+                return reject(new Error(`ffmpeg failed (code ${code}): ${stderr.slice(-500)}`));
             }
             if (!fs.existsSync(outputPath)) {
-                return reject(new Error("Output file not found after download"));
+                return reject(new Error("Output file not found after merge"));
             }
             const stat = fs.statSync(outputPath);
             resolve({ filePath: outputPath, fileSize: stat.size });
         });
 
         proc.on("error", (err) => {
-            reject(new Error(`Failed to run yt-dlp: ${err.message}`));
+            reject(new Error(`Failed to run ffmpeg: ${err.message}`));
         });
     });
 }
 
 /**
- * Cleanup a file after use
+ * Cleanup a temp file after streaming
  */
 function cleanup(filePath) {
     try {
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     } catch (e) {
-        console.error("[CLEANUP] Failed to delete file:", filePath, e.message);
+        console.error("[CLEANUP] Failed:", filePath, e.message);
     }
 }
 
