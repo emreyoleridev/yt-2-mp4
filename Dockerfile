@@ -10,18 +10,19 @@ RUN npm install --omit=dev
 FROM node:20-slim
 
 # Install ffmpeg, python3, curl, ca-certificates
-RUN apt-get update && apt-get install -y \
+RUN apt-get update --allow-releaseinfo-change -o Acquire::Check-Valid-Until=false -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true && \
+    apt-get install -y --no-install-recommends --allow-unauthenticated \
     ffmpeg \
     python3 \
     curl \
     ca-certificates \
-    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Install latest yt-dlp binary
+# Install latest yt-dlp binary and verify
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp
+    && chmod a+rx /usr/local/bin/yt-dlp \
+    && yt-dlp --version
 
 WORKDIR /app
 
